@@ -17,7 +17,6 @@ Environment variables:
 
 - `MONGO_URL` (optional, default: `mongodb://localhost:27017`)
 - `DB_NAME` (optional, default: `gtm_newsletter`)
-- `EMERGENT_LLM_KEY` (required for non-custom key model execution)
 - `CORS_ORIGINS` (optional, comma-separated)
 
 ### Frontend
@@ -43,7 +42,6 @@ This repo includes `vercel.json` configured to:
 Set these project environment variables in Vercel:
 - `MONGO_URL`
 - `DB_NAME`
-- `EMERGENT_LLM_KEY` (if needed)
 - `CORS_ORIGINS` (recommended for explicit origin allowlist)
 
 ## Notes on security
