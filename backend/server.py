@@ -156,6 +156,20 @@ def extract_anthropic_response_text(message) -> str:
 async def root():
     return {"message": "GTM Newsletter Intelligence API"}
 
+@api_router.get("/health")
+async def health_check():
+    """Health check endpoint — verifies the API and database are reachable."""
+    try:
+        await client.admin.command("ping")
+        db_status = "connected"
+    except Exception as e:
+        db_status = f"unreachable: {str(e)}"
+    return {
+        "status": "ok",
+        "db": db_status,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
 @api_router.post("/newsletters", response_model=Newsletter)
 async def create_newsletter(input_data: NewsletterCreate):
     newsletter = Newsletter(
@@ -638,7 +652,6 @@ async def get_pipeline_status(newsletter_id: str):
 
 async def execute_pipeline(newsletter_id: str, start_from: Optional[str] = None):
     """Execute the full agent pipeline"""
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
     import anthropic
     import openai
     
@@ -659,11 +672,9 @@ async def execute_pipeline(newsletter_id: str, start_from: Optional[str] = None)
         settings = await db.settings.find_one({"id": "default"}, {"_id": 0})
         monitored_tools = settings.get("monitored_tools", "") if settings else ""
         
-        # Determine which API keys to use
-        use_custom_keys = settings.get("use_custom_keys", False) if settings else False
+        # API keys from settings
         openai_api_key = settings.get("openai_api_key") if settings else None
         anthropic_api_key = settings.get("anthropic_api_key") if settings else None
-        emergent_key = os.environ.get("EMERGENT_LLM_KEY")
         
         # Get reference newsletter if specified
         reference_content = None
@@ -722,68 +733,44 @@ async def execute_pipeline(newsletter_id: str, start_from: Optional[str] = None)
                     
                     user_input = f"Execute your task for the monitoring period: {newsletter['date_range']}"
                     
-                    # Determine which API to use based on settings
-                    if use_custom_keys and ((model_provider == "openai" and openai_api_key) or (model_provider == "anthropic" and anthropic_api_key)):
-                        # Use custom API keys directly
-                        if model_provider == "openai" and openai_api_key:
-                            # Use the OpenAI Responses API for GPT-5.2
-                            oai_client = openai.OpenAI(api_key=openai_api_key)
-                            
-                            # Build tools list – add web search for eligible agents
-                            oai_tools = []
-                            if use_web_search:
-                                oai_tools.append({"type": "web_search_preview"})
-                            
-                            create_kwargs = dict(
-                                model=model_name,
-                                instructions=system_prompt,
-                                input=user_input,
-                            )
-                            if oai_tools:
-                                create_kwargs["tools"] = oai_tools
-                            
-                            api_response = oai_client.responses.create(**create_kwargs)
-                            response = extract_openai_response_text(api_response)
-                            
-                        elif model_provider == "anthropic" and anthropic_api_key:
-                            # Use Anthropic Messages API for Claude
-                            anth_client = anthropic.Anthropic(api_key=anthropic_api_key)
-                            
-                            create_kwargs = dict(
-                                model=model_name,
-                                max_tokens=20000,
-                                temperature=1,
-                                messages=[
-                                    {"role": "user", "content": f"{system_prompt}\n\nExecute your task for the monitoring period: {newsletter['date_range']}"}
-                                ],
-                            )
-                            
-                            # Add web search tool for eligible agents
-                            if use_web_search:
-                                create_kwargs["tools"] = [
-                                    {
-                                        "type": "web_search_20250305",
-                                        "name": "web_search",
-                                    }
-                                ]
-                            
-                            message = anth_client.messages.create(**create_kwargs)
-                            # Extract text from all content blocks (skips tool_use blocks)
-                            response = extract_anthropic_response_text(message)
-                        else:
-                            raise Exception(f"No API key configured for {model_provider}")
+                    # Dispatch to the appropriate LLM provider
+                    if model_provider == "openai" and openai_api_key:
+                        oai_client = openai.OpenAI(api_key=openai_api_key)
+                        oai_tools = []
+                        if use_web_search:
+                            oai_tools.append({"type": "web_search_preview"})
+                        create_kwargs = dict(
+                            model=model_name,
+                            instructions=system_prompt,
+                            input=user_input,
+                        )
+                        if oai_tools:
+                            create_kwargs["tools"] = oai_tools
+                        api_response = oai_client.responses.create(**create_kwargs)
+                        response = extract_openai_response_text(api_response)
+
+                    elif model_provider == "anthropic" and anthropic_api_key:
+                        anth_client = anthropic.Anthropic(api_key=anthropic_api_key)
+                        create_kwargs = dict(
+                            model=model_name,
+                            max_tokens=20000,
+                            temperature=1,
+                            messages=[
+                                {"role": "user", "content": f"{system_prompt}\n\nExecute your task for the monitoring period: {newsletter['date_range']}"}
+                            ],
+                        )
+                        if use_web_search:
+                            create_kwargs["tools"] = [
+                                {
+                                    "type": "web_search_20250305",
+                                    "name": "web_search",
+                                }
+                            ]
+                        message = anth_client.messages.create(**create_kwargs)
+                        response = extract_anthropic_response_text(message)
+
                     else:
-                        # Use Emergent LLM integration
-                        # Note: web search is not available through the Emergent integration;
-                        # agents will rely on the LLM's training data only.
-                        chat = LlmChat(
-                            api_key=emergent_key,
-                            session_id=f"{newsletter_id}-{agent_name}-{attempt}",
-                            system_message=system_prompt
-                        ).with_model(model_provider, model_name)
-                        
-                        user_message = UserMessage(text=user_input)
-                        response = await chat.send_message(user_message)
+                        raise Exception(f"No API key configured for provider '{model_provider}'. Please add your API keys in Settings.")
                     
                     end_time = datetime.now(timezone.utc)
                     duration = int((end_time - start_time).total_seconds())
